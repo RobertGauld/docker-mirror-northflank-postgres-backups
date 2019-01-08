@@ -1,0 +1,6 @@
+source :rubygems
+ruby File.read(File.join(__dir__, '.ruby-version')).chomp
+
+gem 'dotenv', '~> 2.5'
+gem 'heroku-api-postgres', '~> 0.10'
+gem 'parallel', '~> 1.12'
