@@ -1,8 +1,10 @@
 # mirror-heroku-postgres-backups
+
 A simple script to maintain a mirror copy of postgres backups held in heroku.
 If a backup is deleted from heroku it will be deleted from the mirror.
 
 ## To use:
+
 1. Mount the following files/folders/volumes:
   * /media/destination - a directory to mirror the backups in, anything not in heroku will be deleted!
 2. Set the following environment variables:
@@ -12,6 +14,7 @@ If a backup is deleted from heroku it will be deleted from the mirror.
 3. Optionally also set the following environment variables:
   * LOG_LEVEL - how much logging, default 2 (Info)
   * THREADS - how many threads to use for downloading and gathering data, default 4
+  * EXCLUDE_APPS - a comma seperated list of app names to exclude
 
 ## Destination
 The folder used as the destination will end up being populated similarly to:

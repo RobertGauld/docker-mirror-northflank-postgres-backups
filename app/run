@@ -15,6 +15,7 @@ Dotenv.load # defaults to '.env'
 THREADS = ENV.fetch('THREADS', 4).to_i
 HEROKU_AUTH_TOKEN = ENV.fetch('HEROKU_AUTH_TOKEN')
 DESTINATION = File.expand_path(ENV.fetch('DESTINATION', '/media/destination'))
+EXCLUDE_APPS = ENV.fetch('EXCLUDE_APPS', '').split(',').map(&:strip)
 
 
 # Configure the app wide logger
@@ -32,6 +33,7 @@ $logger.info 'Loaded configuration'
 $logger.debug "Heroku auth token: #{ENV['HEROKU_AUTH_TOKEN'] ? 'present' : 'absent!'}"
 $logger.debug "Using #{THREADS} threads."
 $logger.debug "Saving to: #{DESTINATION}"
+$logger.debug "Excluding #{EXCLUDE_APPS.count} apps: #{EXCLUDE_APPS.join(', ')}"
 
 
 # Setup clients
@@ -46,9 +48,14 @@ apps = heroku_client.app.list
 
 $logger.info 'Fetching list of databases.'
 databases = Parallel.map(apps, in_threads: THREADS) do |app|
+    if EXCLUDE_APPS.include? app.fetch('name')
+      $logger.debug "Skipping #{app.fetch('name')} as it's in the exclude apps list."
+      next nil
+    end
+
     heroku_client.addon.list_by_app(app.fetch('id'))
                  .select { |a| a.dig('addon_service', 'name').eql?('heroku-postgresql') }
-end.flatten.uniq { |a| a['name'] }
+end.reject(&:nil?).flatten.uniq { |a| a['name'] }
 
 $logger.info 'Fetching list of backups.'
 backups = Hash[Parallel.map(databases, in_threads: THREADS) do |database|
@@ -106,6 +113,7 @@ $logger.info 'Deleting removed files'
 source_files = source.map { |db_name, app_name, time, _app_id, _backup_num| File.join app_name, "#{db_name}_#{time.strftime('%F_%T')}.dump" }
 Dir.foreach(DESTINATION) do |destination_entry|
   next if destination_entry.eql?('.') || destination_entry.eql?('..')
+  next if EXCLUDE_APPS.include?(destination_entry)
   next unless File.directory?(File.join(DESTINATION, destination_entry))
 
   # We now have a directory which should contain backup files
