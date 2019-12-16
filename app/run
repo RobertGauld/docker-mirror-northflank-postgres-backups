@@ -48,13 +48,13 @@ apps = heroku_client.app.list
 
 $logger.info 'Fetching list of databases.'
 databases = Parallel.map(apps, in_threads: THREADS) do |app|
-    if EXCLUDE_APPS.include? app.fetch('name')
-      $logger.debug "Skipping #{app.fetch('name')} as it's in the exclude apps list."
-      next nil
-    end
+  if EXCLUDE_APPS.include? app.fetch('name')
+    $logger.debug "Skipping #{app.fetch('name')} as it's in the exclude apps list."
+    next nil
+  end
 
-    heroku_client.addon.list_by_app(app.fetch('id'))
-                 .select { |a| a.dig('addon_service', 'name').eql?('heroku-postgresql') }
+  heroku_client.addon.list_by_app(app.fetch('id'))
+               .select { |a| a.dig('addon_service', 'name').eql?('heroku-postgresql') }
 end.reject(&:nil?).flatten.uniq { |a| a['name'] }
 
 $logger.info 'Fetching list of backups.'
@@ -90,7 +90,7 @@ Parallel.each(source, in_threads: THREADS) do |db_name, app_name, time, app_id, 
   FileUtils.mkdir_p(File.dirname(file_name))
 
   if File.exist?(file_name)
-    $logger.debug 'Skipping download - destination file exists.'
+    $logger.debug "Skipping download - #{file_name} exists."
     next
   end
 
