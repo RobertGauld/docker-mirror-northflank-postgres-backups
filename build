@@ -7,6 +7,8 @@ set -eu
 # Build the new image
 docker build \
   --force-rm \
-  --tag robertgauld/mirror-heroku-postgres-backups \
+  --tag mirror-northflank-postgres-backups \
   --file Dockerfile \
   $@ ./
+
+docker save --output mirror-northflank-postgres-backups_image.tar mirror-northflank-postgres-backups

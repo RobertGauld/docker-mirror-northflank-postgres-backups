@@ -2,20 +2,19 @@
 
 require 'dotenv'
 require 'fileutils'
-require 'heroku/api/postgres'
 require 'logger'
 require 'open-uri'
 require 'parallel'
+require 'json'
 
 
 # Load configuration
 Dotenv.load # defaults to '.env'
-# TODO: Enable require_keys check when next version of gem is released
-#Dotenv.require_keys('HEROKU_AUTH_TOKEN')
+Dotenv.require_keys('NORTHFLANK_AUTH_TOKEN')
 THREADS = ENV.fetch('THREADS', 4).to_i
-HEROKU_AUTH_TOKEN = ENV.fetch('HEROKU_AUTH_TOKEN')
+NORTHFLANK_AUTH_TOKEN = ENV.fetch('NORTHFLANK_AUTH_TOKEN')
 DESTINATION = File.expand_path(ENV.fetch('DESTINATION', '/media/destination'))
-EXCLUDE_APPS = ENV.fetch('EXCLUDE_APPS', '').split(',').map(&:strip)
+EXCLUDE_PROJECTS = ENV.fetch('EXCLUDE_PROJECTS', '').split(',').map(&:strip).freeze
 
 
 # Configure the app wide logger
@@ -30,61 +29,63 @@ $logger.level = ENV['LOG_LEVEL']&.to_i || Logger::INFO
 
 
 $logger.info 'Loaded configuration'
-$logger.debug "Heroku auth token: #{ENV['HEROKU_AUTH_TOKEN'] ? 'present' : 'absent!'}"
+$logger.debug "NorthFlank auth token: #{ENV['NORTHFLANK_AUTH_TOKEN'] ? 'present' : 'absent!'}"
 $logger.debug "Using #{THREADS} threads."
 $logger.debug "Saving to: #{DESTINATION}"
-$logger.debug "Excluding #{EXCLUDE_APPS.count} apps: #{EXCLUDE_APPS.join(', ')}"
-
-
-# Setup clients
-heroku_client = PlatformAPI.connect_oauth(HEROKU_AUTH_TOKEN)
-postgres_api_client = Heroku::Api::Postgres.connect_oauth(HEROKU_AUTH_TOKEN)
-backups_client = postgres_api_client.backups
+$logger.debug "Excluding #{EXCLUDE_PROJECTS.count} projects: #{EXCLUDE_PROJECTS.join(', ')}"
 
 
 # Get data
-$logger.info 'Fetching list of apps.'
-apps = heroku_client.app.list
+$logger.debug 'Fetching list of projects.'
+projects = JSON.parse(URI.open('https://api.northflank.com/v1/projects', 'Authorization' => "Bearer #{NORTHFLANK_AUTH_TOKEN}").read)
+               .fetch('data').fetch('projects')
+$logger.info "Found #{projects.count} projects: #{projects.map { _1.fetch('name') }.join(', ')}"
 
-$logger.info 'Fetching list of databases.'
-databases = Parallel.map(apps, in_threads: THREADS) do |app|
-  if EXCLUDE_APPS.include? app.fetch('name')
-    $logger.debug "Skipping #{app.fetch('name')} as it's in the exclude apps list."
+$logger.debug 'Fetching list of postgres addons.'
+databases = Parallel.map(projects, in_threads: THREADS) do |project|
+  if EXCLUDE_PROJECTS.include? project.fetch('id')
+    $logger.debug "Skipping #{project['name']} as it's in the exclude projects list."
     next nil
   end
 
-  heroku_client.addon.list_by_app(app.fetch('id'))
-               .select { |a| a.dig('addon_service', 'name').eql?('heroku-postgresql') }
-end.reject(&:nil?).flatten.uniq { |a| a['name'] }
+  items = JSON.parse(URI.open("https://api.northflank.com/v1/projects/#{project.fetch('id')}/addons", 'Authorization' => "Bearer #{NORTHFLANK_AUTH_TOKEN}").read)
+              .fetch('data').fetch('addons')
+              .select { _1.dig('spec', 'type') == 'postgres' }
+              .map { _1.merge 'project' => project }
+  $logger.info "Found #{items.count} postgres addons for #{project['name']}"
+  items
+end.reject(&:empty?).flatten
 
-$logger.info 'Fetching list of backups.'
-backups = Hash[Parallel.map(databases, in_threads: THREADS) do |database|
-  [
-    database['id'],
-    backups_client.list(database.fetch('app').fetch('id'))
-                  .select { |backup| backup[:to_name].end_with?('BACKUP') && backup[:finished_at] && backup[:succeeded] }
-  ]
-end]
+$logger.debug 'Fetching list of backups.'
+backups = Parallel.map(databases, in_threads: THREADS) do |database|
+  items = JSON.parse(URI.open("https://api.northflank.com/v1/projects/#{database.fetch('project').fetch('id')}/addons/#{database.fetch('name')}/backups", 'Authorization' => "Bearer #{NORTHFLANK_AUTH_TOKEN}").read)
+              .fetch('data').fetch('backups')
+              .each do |item|
+                item['database'] = database
+                item['createdAt'] = Time.parse(item.fetch('createdAt'))
+                item['fileName'] = if item['name'].match?(/\A\d{2}\/\d{2}\/\d{4} \d{2}:\d{2} UTC\Z/)
+                                     "#{item.fetch('createdAt').strftime('%Y-%m-%d_%H%M')}.dump"
+                                   else
+                                     item.fetch('name') + '.dump'
+                                   end
+                end
+  $logger.info "Found #{items.count} backups for #{database.dig('project', 'name')} → #{database['name']}"
+  items
+end.flatten
 
-
-source = []
-databases.each do |database|
-  app_id = database.fetch('app').fetch('id')
-  app_name = database.fetch('app').fetch('name')
-  db_name = database.fetch('name')
-  backups[database.fetch('id')].each do |backup|
-    time = Time.parse(backup.fetch(:started_at)).getutc
-    source.push [db_name, app_name, time, app_id, backup.fetch(:num)]
-  end
-end
 
 $logger.info 'Downloading databases'
-Parallel.each(source, in_threads: THREADS) do |db_name, app_name, time, app_id, backup_num|
-  Thread.current.thread_variable_set(:logger_label, db_name)
+Parallel.each(backups, in_threads: THREADS) do |backup|
+  database = backup.fetch('database')
+  project = database.fetch('project')
+
+  Thread.current.thread_variable_set(:logger_label, "#{project['id']}--#{database['id']}--#{backup['id']}")
+
   file_name = File.join(
     DESTINATION,
-    app_name,
-    "#{db_name}_#{time.strftime('%F_%T')}.dump"
+    project.fetch('name'),
+    database.fetch('name'),
+    backup.fetch('fileName')
   )
 
   FileUtils.mkdir_p(File.dirname(file_name))
@@ -94,46 +95,58 @@ Parallel.each(source, in_threads: THREADS) do |db_name, app_name, time, app_id, 
     next
   end
 
-  $logger.info "Downloading #{app_name}'s #{db_name} from " \
-               "#{time.strftime('%F %T')}."
-  url = URI(backups_client.url(app_id, backup_num).fetch(:url))
+  $logger.info "Downloading #{project['name']} → #{database['name']} → #{backup['name']}."
+  download_url = JSON.parse(URI.open("https://api.northflank.com/v1/projects/#{project.fetch('id')}/addons/#{database.fetch('name')}/backups/#{backup.fetch('id')}/download-link", 'Authorization' => "Bearer #{NORTHFLANK_AUTH_TOKEN}").read)
+                     .fetch('data').fetch('downloadLink')
   $logger.debug "Downloading to #{file_name}"
-  $logger.debug "Downloading from #{url}"
+  $logger.debug "Downloading from #{download_url}"
 
-  downloaded = url.open
-  if downloaded.is_a?(StringIO)
-    IO.copy_stream(downloaded, file_name)
+  download = URI(download_url).open
+  if download.is_a?(StringIO)
+    IO.copy_stream(download, file_name)
   else
-    FileUtils.mv(downloaded.path, file_name)
+    FileUtils.mv(download.path, file_name)
   end
 end
 
 
 $logger.info 'Deleting removed files'
-source_files = source.map { |db_name, app_name, time, _app_id, _backup_num| File.join app_name, "#{db_name}_#{time.strftime('%F_%T')}.dump" }
-Dir.foreach(DESTINATION) do |destination_entry|
-  next if destination_entry.eql?('.') || destination_entry.eql?('..')
-  next if EXCLUDE_APPS.include?(destination_entry)
-  next unless File.directory?(File.join(DESTINATION, destination_entry))
+source_files = backups.map { File.join _1.fetch('database').fetch('project').fetch('name'), _1.fetch('database').fetch('name'), _1.fetch('fileName') }
 
-  # We now have a directory which should contain backup files
-  Dir.foreach(File.join(DESTINATION, destination_entry)) do |entry|
-    next if entry.eql?('.') || entry.eql?('..')
-    file_name = File.join DESTINATION, destination_entry, entry
-    next unless File.file? file_name
+Dir.foreach(DESTINATION) do |project_directory|
+  next if project_directory.eql?('.') || project_directory.eql?('..')
+  next unless File.directory?(File.join(DESTINATION, project_directory))
+  next unless projects.reject { EXCLUDE_PROJECTS.include? _1['id'] }.map { _1['name'] }.include? project_directory
 
-    # We now have what should be a dump file
-    next if source_files.include? File.join(destination_entry, entry)
+  Dir.foreach(File.join(DESTINATION, project_directory)) do |database_directory|
+    next if database_directory.eql?('.') || database_directory.eql?('..')
+    next unless File.directory?(File.join(DESTINATION, project_directory, database_directory))
 
-    # We now have a file which doesn't exist in source
-    $logger.info "Deleting #{File.join(destination_entry, entry)}"
-    File.unlink(file_name)
+    # We now have a directory which should contain backup files
+    Dir.foreach(File.join(DESTINATION, project_directory, database_directory)) do |entry|
+      next if entry.eql?('.') || entry.eql?('..')
+      file_name = File.join project_directory, database_directory, entry
+      next unless File.file? File.join(DESTINATION, file_name)
+
+      # We now have what should be a dump file
+      next if source_files.include? file_name
+
+      # We now have a file which doesn't exist in source
+      $logger.debug "Deleting #{file_name}"
+      File.unlink(File.join(DESTINATION, file_name))
+    end
+
+    # Remove directory if it's empty
+    if Dir.foreach(File.join(DESTINATION, project_directory, database_directory)).count == 2
+      $logger.info "Deleting empty database directory #{database_directory}"
+      Dir.unlink File.join(DESTINATION, project_directory, database_directory)
+    end
   end
 
-  # Remove directory if it's empty7
-  if Dir.foreach(File.join(DESTINATION, destination_entry)).count == 2
-    $logger.info "Deleting empty directory #{destination_entry}"
-    Dir.unlink File.join(DESTINATION, destination_entry)
+  # Remove directory if it's empty
+  if Dir.foreach(File.join(DESTINATION, project_directory)).count == 2
+    $logger.info "Deleting empty project directory #{project_directory}"
+    Dir.unlink File.join(DESTINATION, project_directory)
   end
 end
 
