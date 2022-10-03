@@ -78,6 +78,10 @@ $logger.info 'Downloading databases'
 Parallel.each(backups, in_threads: THREADS) do |backup|
   database = backup.fetch('database')
   project = database.fetch('project')
+  unless backup['status'] == 'completed'
+    $logger.info "Skipping #{project['name']} → #{database['name']} → #{backup['name']} - has status \"#{backup['status']}\""
+    next
+  end
 
   Thread.current.thread_variable_set(:logger_label, "#{project['id']}--#{database['id']}--#{backup['id']}")
 
@@ -91,7 +95,7 @@ Parallel.each(backups, in_threads: THREADS) do |backup|
   FileUtils.mkdir_p(File.dirname(file_name))
 
   if File.exist?(file_name)
-    $logger.debug "Skipping download - #{file_name} exists."
+    $logger.debug "Skipping #{project['name']} → #{database['name']} → #{backup['name']} - #{file_name} exists."
     next
   end
 
