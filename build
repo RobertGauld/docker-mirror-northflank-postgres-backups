@@ -4,11 +4,14 @@
 # or if any unbound variables lurk within (u)
 set -eu
 
+tag='mirror-northflank-postgres-backups'
+
 # Build the new image
 docker build \
   --force-rm \
-  --tag mirror-northflank-postgres-backups \
+  --tag $tag \
   --file Dockerfile \
   $@ ./
 
-docker save --output mirror-northflank-postgres-backups_image.tar mirror-northflank-postgres-backups
+docker save --output ../"$tag"_image.tar $tag
+docker rmi "$tag"
