@@ -63,16 +63,11 @@ backups = Parallel.map(databases, in_threads: THREADS) do |database|
               .each do |item|
                 item['database'] = database
                 item['createdAt'] = Time.parse(item.fetch('createdAt'))
-                item['fileName'] = if item['name'].match?(/\A\d{2}\/\d{2}\/\d{4} \d{2}:\d{2} UTC\Z/)
-                                     "#{item.fetch('createdAt').strftime('%Y-%m-%d_%H%M')}.dump"
-                                   else
-                                     item.fetch('name') + '.dump'
-                                   end
-                end
+                item['fileName'] = "#{item.fetch('createdAt').strftime('%Y-%m-%d_%H%M')}.dump"
+              end
   $logger.info "Found #{items.count} backups for #{database.dig('project', 'name')} → #{database['name']}"
   items
 end.flatten
-
 
 $logger.info 'Downloading databases'
 Parallel.each(backups, in_threads: THREADS) do |backup|
